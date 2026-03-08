@@ -270,11 +270,23 @@ export default function activate(api: OpenClawPluginApi, _config?: PluginConfig)
               text = raw;
             } else if (Array.isArray(raw)) {
               text = raw
-                .map((b: any) => (typeof b === "string" ? b : b?.text || b?.type || ""))
+                .map((b: any) => {
+                  if (typeof b === "string") return b;
+                  if (b?.type === "text") return b.text || "";
+                  if (b?.type === "tool_use") return `toolCall:${b.name || "unknown"}`;
+                  if (b?.type === "tool_result") return `toolResult:${typeof b.content === "string" ? b.content.slice(0, 50) : ""}`;
+                  if (b?.type === "thinking") return "thinking";
+                  if (b?.type === "image" || b?.type === "image_url") return "[image]";
+                  if (b?.text) return b.text;
+                  return b?.type || "";
+                })
                 .filter(Boolean)
                 .join(" ");
+            } else if (raw && typeof raw === "object") {
+              // 単一オブジェクト（非配列）
+              text = raw.text || raw.type || JSON.stringify(raw).slice(0, 200);
             } else {
-              text = JSON.stringify(raw ?? "");
+              text = String(raw ?? "");
             }
             return `${m.role}: ${text.slice(0, 200)}`;
           })
