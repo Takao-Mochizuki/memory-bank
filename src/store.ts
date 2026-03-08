@@ -86,6 +86,16 @@ export async function createStore(dbPath: string, vectorDim: number): Promise<Me
 
   if (tableNames.includes(TABLE_NAME)) {
     table = await db.openTable(TABLE_NAME);
+    // 既存テーブルでも FTS インデックスがなければ作成
+    try {
+      const indices = await table.listIndices();
+      const hasFts = indices.some((idx: any) => idx.indexType === "FTS" || idx.columns?.includes("text"));
+      if (!hasFts) {
+        await table.createIndex("text", { config: lancedb.Index.fts() });
+      }
+    } catch {
+      // インデックス確認/作成失敗はサイレントに
+    }
   } else {
     // 初期ダミーレコードでスキーマ定義
     const seed: MemoryEntry = {

@@ -30,6 +30,7 @@ interface PluginConfig {
   autoCapture?: boolean;
   autoRecall?: boolean;
   autoRecallMinLength?: number;
+  autoRecallCategories?: string[];
   retrieval?: {
     mode?: "hybrid" | "vector";
     vectorWeight?: number;
@@ -108,6 +109,10 @@ export default async function activate(api: OpenClawPluginApi, _config?: PluginC
   // 6. 自動想起 — ユーザーメッセージ受信時に関連記憶を注入
   if (config.autoRecall) {
     const minLength = config.autoRecallMinLength ?? 10;
+    // reflection はセッション内部記録なので autoRecall から除外（デフォルト）
+    const allowedCategories = new Set(
+      config.autoRecallCategories || ["fact", "lesson", "preference", "decision", "entity", "other"],
+    );
 
     api.on("before_agent_start", async (event: any, ctx: any) => {
       const prompt = event?.prompt || "";
@@ -117,9 +122,14 @@ export default async function activate(api: OpenClawPluginApi, _config?: PluginC
       const scope = scopeManager.resolve(agentId);
 
       try {
-        const results = await retriever.recall(prompt, scope, 5);
-        if (results.length > 0) {
-          const memories = results
+        // 多めに取得してカテゴリフィルタ後に上位5件
+        const poolSize = Math.max(10, allowedCategories.size < 6 ? 15 : 5);
+        const results = await retriever.recall(prompt, scope, poolSize);
+        const filtered = results.filter((r) => allowedCategories.has(r.entry.category));
+        const top = filtered.slice(0, 5);
+
+        if (top.length > 0) {
+          const memories = top
             .map((r) => `- [${r.entry.category}] ${r.entry.text}`)
             .join("\n");
 
