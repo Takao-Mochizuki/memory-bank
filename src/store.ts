@@ -4,7 +4,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, accessSync, constants } from "node:fs";
+import { existsSync, mkdirSync, accessSync, constants, unlinkSync, openSync, closeSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 /** scope / id に使える文字を制限（SQLインジェクション防止） */
 const SAFE_IDENTIFIER = /^[a-zA-Z0-9_:@.\-\u3000-\u9fff\uff00-\uffef]+$/;
@@ -92,12 +93,70 @@ function ensureStoragePath(dbPath: string): string {
 const TABLE_NAME = "memories";
 
 /**
+ * ファイルベースのアドバイザリーロック（addIfNotDuplicate の原子性確保）
+ * O_EXCL による排他的ファイル作成でプロセス間のシリアライゼーションを実現
+ */
+class FileLock {
+  private lockDir: string;
+
+  constructor(dbPath: string) {
+    this.lockDir = join(dbPath, ".locks");
+    if (!existsSync(this.lockDir)) {
+      mkdirSync(this.lockDir, { recursive: true });
+    }
+  }
+
+  /**
+   * ロックを取得して処理を実行、完了後に解放
+   * ロック取得失敗時はリトライ（最大 retries 回、interval ms 間隔）
+   */
+  async withLock<T>(key: string, fn: () => Promise<T>, retries = 5, interval = 50): Promise<T> {
+    // キーをファイル名セーフにする
+    const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const lockFile = join(this.lockDir, `${safeKey}.lock`);
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        // O_CREAT | O_EXCL: ファイルが存在しない場合のみ作成（原子的）
+        const fd = openSync(lockFile, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+        closeSync(fd);
+
+        try {
+          return await fn();
+        } finally {
+          try { unlinkSync(lockFile); } catch { /* ロック解放失敗は無視 */ }
+        }
+      } catch (err: any) {
+        if (err.code !== "EEXIST") throw err;
+        // ロックファイルが存在 → 他プロセスが保持中
+
+        // stale lock 検出: 60秒以上古いロックファイルは削除
+        try {
+          const stat = statSync(lockFile);
+          if (Date.now() - stat.mtimeMs > 60_000) {
+            try { unlinkSync(lockFile); } catch { /* 既に解放済みの可能性 */ }
+          }
+        } catch { /* stat 失敗は無視 */ }
+
+        if (attempt < retries) {
+          await new Promise((resolve) => setTimeout(resolve, interval));
+        }
+      }
+    }
+
+    // リトライ上限到達 → ロックなしで実行（最悪でも重複が1件残るだけ）
+    return fn();
+  }
+}
+
+/**
  * LanceDB ベースのメモリストアを生成
  */
 export async function createStore(dbPath: string, vectorDim: number): Promise<MemoryStore> {
   const lancedb = await loadLanceDB();
   const validPath = ensureStoragePath(dbPath);
   const db = await lancedb.connect(validPath);
+  const fileLock = new FileLock(validPath);
 
   // テーブル取得または作成
   let table: Awaited<ReturnType<typeof db.openTable>>;
@@ -308,42 +367,23 @@ export async function createStore(dbPath: string, vectorDim: number): Promise<Me
     },
 
     async addIfNotDuplicate(entry, textHash) {
-      // check-then-add を最小ウィンドウで実行
-      // LanceDB に一意制約がないため完全な原子性は保証できないが、
-      // チェックと追加を連続実行してウィンドウを最小化する
-      const exists = await this.existsByTextHash(textHash, entry.scope);
-      if (exists) return null;
+      // ファイルロックで (scope, textHash) 単位のシリアライゼーションを確保
+      // 同一キーの並行 addIfNotDuplicate はロック待ちになる
+      const lockKey = `dedup-${sqlEscape(entry.scope)}-${textHash}`;
 
-      const id = randomUUID();
-      const row: MemoryEntry = {
-        ...entry,
-        id,
-        timestamp: Date.now(),
-      };
-      await table.add([row]);
+      return fileLock.withLock(lockKey, async () => {
+        const exists = await this.existsByTextHash(textHash, entry.scope);
+        if (exists) return null;
 
-      // 追加後に再チェック: 同時に追加された重複があれば自分を削除
-      // （後から追加した方が自主的に退く楽観的制御）
-      try {
-        const duplicates = await table
-          .query()
-          .select(["id"])
-          .where(`scope = '${sqlEscape(entry.scope)}' AND id != '__seed__' AND metadata LIKE '%"textHash":"${sqlEscape(textHash)}"%'`)
-          .toArray();
-        if (duplicates.length > 1) {
-          // 自分のIDが最後に追加されたなら削除（先勝ち）
-          const otherIds = duplicates.filter((r: any) => r.id !== id);
-          if (otherIds.length > 0) {
-            // 他に既にある → 自分を削除
-            await table.delete(`id = '${sqlEscape(id)}'`);
-            return null;
-          }
-        }
-      } catch {
-        // 後追いチェック失敗は無視（最悪でも重複が1件残るだけ）
-      }
-
-      return id;
+        const id = randomUUID();
+        const row: MemoryEntry = {
+          ...entry,
+          id,
+          timestamp: Date.now(),
+        };
+        await table.add([row]);
+        return id;
+      });
     },
   };
 }

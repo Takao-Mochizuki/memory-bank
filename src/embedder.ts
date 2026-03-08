@@ -225,17 +225,9 @@ export function createEmbedder(config: EmbedderConfig): Embedder {
   const cache = new VectorCache();
   const taskAwareEnabled = config.taskAware !== false; // デフォルト true
 
-  // DNS 解決ベースの SSRF 検証（初回 API 呼び出し前に1回だけ実行）
-  let dnsChecked = false;
-  async function ensureDNSSafe(): Promise<void> {
-    if (dnsChecked) return;
-    // 検証成功後にフラグをセット（失敗時は次回も再検証）
-    await validateEndpointDNS(baseURL, "embedding.baseURL");
-    dnsChecked = true;
-  }
-
+  // DNS 解決ベースの SSRF 検証（毎回実行 — DNS rebinding 対策）
   async function callApi(texts: string[]): Promise<number[][]> {
-    await ensureDNSSafe();
+    await validateEndpointDNS(baseURL, "embedding.baseURL");
     const response = await client.embeddings.create({
       model,
       input: texts,
