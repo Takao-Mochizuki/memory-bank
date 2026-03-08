@@ -109,8 +109,9 @@ class FileLock {
   /**
    * ロックを取得して処理を実行、完了後に解放
    * ロック取得失敗時はリトライ（最大 retries 回、interval ms 間隔）
+   * リトライ上限到達時は fail-closed（null を返す）
    */
-  async withLock<T>(key: string, fn: () => Promise<T>, retries = 5, interval = 50): Promise<T> {
+  async withLock<T>(key: string, fn: () => Promise<T>, retries = 20, interval = 100): Promise<T | null> {
     // キーをファイル名セーフにする
     const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, "_");
     const lockFile = join(this.lockDir, `${safeKey}.lock`);
@@ -130,10 +131,10 @@ class FileLock {
         if (err.code !== "EEXIST") throw err;
         // ロックファイルが存在 → 他プロセスが保持中
 
-        // stale lock 検出: 60秒以上古いロックファイルは削除
+        // stale lock 検出: 30秒以上古いロックファイルは削除
         try {
           const stat = statSync(lockFile);
-          if (Date.now() - stat.mtimeMs > 60_000) {
+          if (Date.now() - stat.mtimeMs > 30_000) {
             try { unlinkSync(lockFile); } catch { /* 既に解放済みの可能性 */ }
           }
         } catch { /* stat 失敗は無視 */ }
@@ -144,8 +145,8 @@ class FileLock {
       }
     }
 
-    // リトライ上限到達 → ロックなしで実行（最悪でも重複が1件残るだけ）
-    return fn();
+    // fail-closed: ロック取得できなければ追加しない（重複より安全側に倒す）
+    return null;
   }
 }
 
