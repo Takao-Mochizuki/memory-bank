@@ -144,7 +144,8 @@ async function cmdStats(flags: Record<string, string>): Promise<void> {
 }
 
 async function cmdList(flags: Record<string, string>): Promise<void> {
-  const limit = parseInt(flags["limit"] || "20", 10);
+  const rawLimit = parseInt(flags["limit"] || "20", 10);
+  const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 1000) : 20;
   const scope = flags["scope"];
   const table = await openTable(resolveDbPath(flags));
   const entries = await queryAll(table, scope, limit);

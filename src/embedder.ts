@@ -10,6 +10,23 @@ import { createHash } from "node:crypto";
 /**
  * SSRF防止: URL がプライベートネットワークを指していないか検証
  */
+/**
+ * ホスト名が localhost 系かどうかを判定
+ */
+function isLocalhost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+}
+
+/**
+ * SSRF防止: URL がプライベートネットワークを指していないか検証
+ *
+ * 戦略:
+ * - localhost は Ollama 等ローカル用途で許可（明示的 opt-in）
+ * - プライベート IP（RFC1918, リンクローカル, メタデータ）をブロック
+ * - DNS rebinding 対策: *.nip.io, *.sslip.io 等の wildcard DNS をブロック
+ * - IPv6-mapped IPv4（::ffff:127.0.0.1 等）をブロック
+ * - スキーマ制限: http/https のみ許可
+ */
 export function validateEndpointURL(url: string, label: string): void {
   let parsed: URL;
   try {
@@ -17,17 +34,46 @@ export function validateEndpointURL(url: string, label: string): void {
   } catch {
     throw new Error(`memory-bank: ${label} の URL が不正です: ${url}`);
   }
+
+  // スキーマ制限
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`memory-bank: ${label} は http/https のみ許可されています: ${parsed.protocol}`);
+  }
+
   const hostname = parsed.hostname.toLowerCase();
-  // localhost は開発用途（Ollama等）で許可
-  // 169.254.x.x（リンクローカル）とクラウドメタデータエンドポイントをブロック
+
+  // localhost は許可（Ollama等のローカルサービス用）
+  if (isLocalhost(hostname)) return;
+
+  // Wildcard DNS サービスをブロック（DNS rebinding 対策）
+  const wildcardDnsPatterns = [
+    /\.nip\.io$/,
+    /\.sslip\.io$/,
+    /\.xip\.io$/,
+    /\.lvh\.me$/,
+    /\.localtest\.me$/,
+    /\.vcap\.me$/,
+  ];
+  for (const pattern of wildcardDnsPatterns) {
+    if (pattern.test(hostname)) {
+      throw new Error(`memory-bank: ${label} に wildcard DNS サービスは指定できません: ${hostname}`);
+    }
+  }
+
+  // プライベート/メタデータ IP をブロック
   const blocked = [
-    /^169\.254\./,         // リンクローカル（AWS/GCP メタデータ）
-    /^10\./,               // RFC1918
-    /^172\.(1[6-9]|2\d|3[01])\./,  // RFC1918
-    /^192\.168\./,         // RFC1918
-    /^\[?::1\]?$/,         // IPv6 loopback
-    /^\[?fe80:/i,          // IPv6 リンクローカル
-    /^metadata\.google\.internal$/i,
+    /^169\.254\./,                      // リンクローカル（AWS/GCP メタデータ）
+    /^10\./,                            // RFC1918
+    /^172\.(1[6-9]|2\d|3[01])\./,      // RFC1918
+    /^192\.168\./,                      // RFC1918
+    /^127\./,                           // loopback 全域
+    /^0\./,                             // 0.0.0.0/8
+    /^\[?::1\]?$/,                      // IPv6 loopback
+    /^\[?fe80:/i,                       // IPv6 リンクローカル
+    /^\[?::ffff:/i,                     // IPv6-mapped IPv4
+    /^\[?fc00:/i,                       // IPv6 ユニークローカル
+    /^\[?fd/i,                          // IPv6 ユニークローカル
+    /^metadata\.google\.internal$/i,    // GCP メタデータ
   ];
   for (const pattern of blocked) {
     if (pattern.test(hostname)) {

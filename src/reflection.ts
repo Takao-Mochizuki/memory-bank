@@ -3,10 +3,23 @@
  * セッション終了時に会話から学びを抽出し、長期記憶として保存
  */
 
+import { createHash } from "node:crypto";
 import { CATEGORIES } from "./store.js";
 import type { MemoryStore, MemoryCategory } from "./store.js";
 import type { Embedder } from "./embedder.js";
 import type { ScopeManager } from "./scopes.js";
+
+/** テキストの正規化ハッシュ（重複排除の一意キー） */
+function textHash(text: string): string {
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, " ");
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+/**
+ * 並行実行時の二重保存を防ぐインフライトセット
+ * extractLessons の呼び出し間で共有される
+ */
+const inflightLessons = new Set<string>();
 
 export interface ReflectionConfig {
   enabled: boolean;
@@ -161,21 +174,32 @@ export async function extractLessons(
   for (const item of items) {
     if (item.text.trim().length < 5) continue;
 
-    const vector = await embedder.embed(item.text);
+    // TOCTOU 防止: テキストハッシュで並行実行時の二重保存を排除
+    const hash = textHash(item.text);
+    const lockKey = `${scope}:${hash}`;
+    if (inflightLessons.has(lockKey)) continue;
+    inflightLessons.add(lockKey);
 
-    // 重複チェック: 類似度0.9以上の既存記憶があればスキップ
-    const duplicate = await isDuplicate(vector, store, scope);
-    if (duplicate) continue;
+    try {
+      const vector = await embedder.embed(item.text);
 
-    const id = await store.add({
-      text: item.text,
-      vector,
-      category: item.category,
-      scope,
-      importance: Math.min(1, Math.max(0, item.importance)),
-      metadata: JSON.stringify({ source: "lesson", agentId }),
-    });
-    ids.push(id);
+      // 重複チェック: 類似度0.9以上の既存記憶があればスキップ
+      const duplicate = await isDuplicate(vector, store, scope);
+      if (duplicate) continue;
+
+      const id = await store.add({
+        text: item.text,
+        vector,
+        category: item.category,
+        scope,
+        importance: Math.min(1, Math.max(0, item.importance)),
+        metadata: JSON.stringify({ source: "lesson", agentId, textHash: hash }),
+      });
+      ids.push(id);
+    } finally {
+      // 一定時間後にロック解除（メモリリーク防止）
+      setTimeout(() => inflightLessons.delete(lockKey), 30_000);
+    }
   }
 
   return ids;

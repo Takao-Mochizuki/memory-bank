@@ -10,7 +10,7 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, relative } from "node:path";
 
 import { createEmbedder } from "./src/embedder.js";
 import { createStore } from "./src/store.js";
@@ -80,9 +80,11 @@ function expandPath(p: string): string {
   }
   // 正規化してトラバーサルを解決
   const resolved = resolve(expanded);
-  // ホームディレクトリ配下のみ許可
+  // ホームディレクトリ配下のみ許可（prefix 比較ではなく relative で判定）
   const home = homedir();
-  if (!resolved.startsWith(home)) {
+  const rel = relative(home, resolved);
+  // relative が ".." で始まるか、絶対パスになる場合はホーム外
+  if (rel.startsWith("..") || resolve(home, rel) !== resolved) {
     throw new Error(`memory-bank: dbPath はホームディレクトリ配下のみ指定可能です: ${resolved}`);
   }
   return resolved;
@@ -193,9 +195,10 @@ export default function activate(api: OpenClawPluginApi, _config?: PluginConfig)
           if (text.length < 10 || isNoise(text)) continue;
 
           const scope = sm.resolve(agentId);
-          const vector = await emb.embed(text, "store");
+          const truncated = text.slice(0, 500);
+          const vector = await emb.embed(truncated, "store");
           await store.add({
-            text: text.slice(0, 500),
+            text: truncated,
             vector,
             category: "other",
             scope,

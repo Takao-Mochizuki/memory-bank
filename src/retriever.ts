@@ -170,8 +170,28 @@ export function applyMMR(
   return selected;
 }
 
+/** リランキング送信前に機密パターンをマスキング */
+const SENSITIVE_PATTERNS = [
+  /(?:api[_-]?key|secret[_-]?key|access[_-]?key|token|password|credential|private[_-]?key)\s*[:=]\s*\S+/gi,
+  /(?:sk|pk|ak|rk)-[a-zA-Z0-9]{20,}/g,  // OpenAI, Stripe 等の API キー形式
+  /(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}/g,  // GitHub トークン
+  /(?:AWS|AKIA)[A-Z0-9]{16,}/g,  // AWS キー
+  /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/g,
+];
+
+/** テキストをリランキング用にサニタイズ（スニペット化 + 機密マスキング） */
+function sanitizeForRerank(text: string, maxLen = 200): string {
+  let snippet = text.length > maxLen ? text.slice(0, maxLen) + "..." : text;
+  for (const pattern of SENSITIVE_PATTERNS) {
+    snippet = snippet.replace(pattern, "[REDACTED]");
+  }
+  return snippet;
+}
+
 /**
  * Cross-Encoder リランキング
+ * 注意: 候補テキストは外部エンドポイントに送信される
+ * スニペット化 + 機密パターンマスキングで流出リスクを軽減
  */
 async function rerankWithCrossEncoder(
   query: string,
@@ -180,7 +200,8 @@ async function rerankWithCrossEncoder(
 ): Promise<RetrievalResult[]> {
   if (!config.rerankApiKey || candidates.length === 0) return candidates;
 
-  const documents = candidates.map((c) => c.entry.text);
+  // 全文ではなくスニペットのみ送信（機密情報マスキング済み）
+  const documents = candidates.map((c) => sanitizeForRerank(c.entry.text));
 
   const response = await fetch(config.rerankEndpoint, {
     method: "POST",

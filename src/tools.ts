@@ -40,6 +40,11 @@ function clampNumber(val: number, min: number, max: number, fallback: number): n
   return Math.min(max, Math.max(min, val));
 }
 
+/** ツール入力テキストの最大文字数（API コスト / メモリ DoS 防止） */
+const MAX_TEXT_LENGTH = 5000;
+/** 検索クエリの最大文字数 */
+const MAX_QUERY_LENGTH = 1000;
+
 function formatResults(results: RetrievalResult[]) {
   return results.map((r) => ({
     id: r.entry.id,
@@ -96,9 +101,13 @@ export function registerCoreTools(api: OpenClawPluginApi, lazyDeps: ToolDeps | L
     },
     async execute(_id: string, params: any, ctx?: any) {
       const deps = await getDeps(ctx);
-      const text = String(params.text || "").trim();
+      let text = String(params.text || "").trim();
       if (!text || text.length < 3) {
         return toolResult({ error: "テキストが短すぎます（最低3文字）" });
+      }
+      // 入力サイズ制限（API コスト / メモリ DoS 防止）
+      if (text.length > MAX_TEXT_LENGTH) {
+        text = text.slice(0, MAX_TEXT_LENGTH);
       }
       if (isNoise(text)) {
         return toolResult({ error: "この内容はノイズとして判定されました。より具体的な情報を保存してください。" });
@@ -153,8 +162,12 @@ export function registerCoreTools(api: OpenClawPluginApi, lazyDeps: ToolDeps | L
     },
     async execute(_id: string, params: any, ctx?: any) {
       const deps = await getDeps(ctx);
-      const query = String(params.query || "").trim();
+      let query = String(params.query || "").trim();
       if (!query) return toolResult({ error: "検索クエリが空です" });
+      // クエリサイズ制限
+      if (query.length > MAX_QUERY_LENGTH) {
+        query = query.slice(0, MAX_QUERY_LENGTH);
+      }
 
       const limit = clampNumber(params.limit ?? 5, 1, 20, 5);
       const scope = deps.scopeManager.resolve(deps.agentId, params.scope);
@@ -245,7 +258,7 @@ export function registerCoreTools(api: OpenClawPluginApi, lazyDeps: ToolDeps | L
 
       const fields: any = {};
       if (params.text) {
-        fields.text = String(params.text);
+        fields.text = String(params.text).slice(0, MAX_TEXT_LENGTH);
         fields.vector = await deps.embedder.embed(fields.text, "store");
       }
       if (params.category && CATEGORIES.includes(params.category)) {
@@ -321,19 +334,21 @@ export function registerManagementTools(api: OpenClawPluginApi, lazyDeps: ToolDe
       const deps = await getDeps();
       const agentId = ctx?.agentId;
 
+      // 対象スコープの決定: 指定があればそれを使い、ACL制限付きエージェントは自スコープに限定
+      const requestedScope = params.scope || (agentId ? deps.scopeManager.resolve(agentId) : undefined);
+
       // スコープACLチェック
-      if (params.scope && agentId && !deps.scopeManager.canAccess(agentId, params.scope)) {
+      if (requestedScope && agentId && !deps.scopeManager.canAccess(agentId, requestedScope)) {
         return toolResult({ error: `アクセス拒否` });
       }
 
-      const total = await deps.store.count();
-      const scopeCount = params.scope
-        ? await deps.store.count(params.scope)
-        : total;
+      // ACL制限があるエージェントには全体件数を見せない
+      const scopeCount = requestedScope
+        ? await deps.store.count(requestedScope)
+        : await deps.store.count();
       return toolResult({
-        totalEntries: total,
-        scopeEntries: scopeCount,
-        scope: params.scope || "all",
+        entries: scopeCount,
+        scope: requestedScope || "all",
         vectorDimensions: deps.embedder.dimensions,
       });
     },
