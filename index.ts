@@ -14,12 +14,7 @@ import { createStore } from "./src/store.js";
 import { createRetriever } from "./src/retriever.js";
 import { createScopeManager } from "./src/scopes.js";
 import { registerCoreTools, registerManagementTools } from "./src/tools.js";
-import {
-  storeReflections,
-  parseReflectionOutput,
-  REFLECTION_PROMPT,
-  DEFAULT_REFLECTION_CONFIG,
-} from "./src/reflection.js";
+import { DEFAULT_REFLECTION_CONFIG } from "./src/reflection.js";
 import { isNoise } from "./src/noise-filter.js";
 
 // プラグイン設定の型
@@ -173,13 +168,14 @@ export default async function activate(api: OpenClawPluginApi, config: PluginCon
 
       const agentId = context?.agentId;
 
-      // リフレクションプロンプトをスキルとして提供
-      // 実際の抽出はエージェント側で行い、結果を memory_store で保存
-      // ここではメタデータとしてリフレクションの要求を記録
       try {
         const lastMessages = messages.slice(-reflectionConfig.maxMessages);
+        // autoCapture 有効時はアシスタント発言のみでサマリー生成（二重保存防止）
+        const targetRoles = config.autoCapture
+          ? ["assistant"]
+          : ["user", "assistant"];
         const conversationSummary = lastMessages
-          .filter((m: any) => m.role === "user" || m.role === "assistant")
+          .filter((m: any) => targetRoles.includes(m.role))
           .map((m: any) => `${m.role}: ${String(m.content || "").slice(0, 200)}`)
           .join("\n");
 
@@ -199,8 +195,8 @@ export default async function activate(api: OpenClawPluginApi, config: PluginCon
             }),
           });
         }
-      } catch {
-        // リフレクション失敗はサイレント
+      } catch (e) {
+        console.warn("[memory-bank] Reflection failed:", e);
       }
     });
   }

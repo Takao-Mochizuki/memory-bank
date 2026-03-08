@@ -5,7 +5,9 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, accessSync, constants } from "node:fs";
-import { dirname } from "node:path";
+
+/** scope / id に使える文字を制限（SQLインジェクション防止） */
+const SAFE_IDENTIFIER = /^[a-zA-Z0-9_:@.\-\u3000-\u9fff\uff00-\uffef]+$/;
 
 // LanceDB は動的インポート（ネイティブモジュールのため）
 let lancedbModule: typeof import("@lancedb/lancedb") | null = null;
@@ -53,20 +55,18 @@ export interface MemoryStore {
   remove(id: string): Promise<boolean>;
   listAll(scope: string, limit: number, offset: number): Promise<MemoryEntry[]>;
   count(scope?: string): Promise<number>;
-  update(id: string, fields: Partial<Pick<MemoryEntry, "text" | "category" | "importance" | "metadata">>): Promise<boolean>;
+  update(id: string, fields: Partial<Pick<MemoryEntry, "text" | "vector" | "category" | "importance" | "metadata">>): Promise<boolean>;
 }
 
 /**
  * ストレージパスの検証と作成
+ * LanceDB の connect(path) は path 自体をディレクトリとして扱う
  */
 function ensureStoragePath(dbPath: string): string {
-  const dir = dirname(dbPath);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+  if (!existsSync(dbPath)) {
+    mkdirSync(dbPath, { recursive: true });
   }
-  if (existsSync(dbPath)) {
-    accessSync(dbPath, constants.R_OK | constants.W_OK);
-  }
+  accessSync(dbPath, constants.R_OK | constants.W_OK);
   return dbPath;
 }
 
@@ -99,10 +99,21 @@ export async function createStore(dbPath: string, vectorDim: number): Promise<Me
       metadata: "{}",
     };
     table = await db.createTable(TABLE_NAME, [seed]);
+
+    // FTS インデックス作成（ハイブリッド検索の BM25 側に必要）
+    try {
+      await table.createIndex("text", { config: lancedb.Index.fts() });
+    } catch (e) {
+      console.warn("[memory-bank] FTS index creation failed, hybrid search will fall back to vector-only:", e);
+    }
   }
 
   function sqlEscape(s: string): string {
-    return s.replace(/'/g, "''");
+    if (!SAFE_IDENTIFIER.test(s)) {
+      // 安全な文字以外はシングルクォートエスケープ + バックスラッシュ除去
+      return s.replace(/\\/g, "").replace(/'/g, "''");
+    }
+    return s;
   }
 
   return {
@@ -162,8 +173,8 @@ export async function createStore(dbPath: string, vectorDim: number): Promise<Me
           },
           distance: row._distance ?? row._score ?? 0,
         }));
-      } catch {
-        // フルテキスト非対応の場合はベクトル検索のみで対応
+      } catch (e) {
+        console.warn("[memory-bank] Full-text search failed, falling back to vector-only:", e);
         return [];
       }
     },
@@ -216,7 +227,8 @@ export async function createStore(dbPath: string, vectorDim: number): Promise<Me
       const filter = scope
         ? `scope = '${sqlEscape(scope)}' AND id != '__seed__'`
         : "id != '__seed__'";
-      const results = await table.query().where(filter).toArray();
+      // ベクトルをロードせずIDのみ取得してカウント
+      const results = await table.query().select(["id"]).where(filter).toArray();
       return results.length;
     },
 

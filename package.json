@@ -29,9 +29,10 @@
     "openai": "^6.21.0"
   },
   "devDependencies": {
+    "jiti": "^2.6.0",
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --import jiti/register --test test/*.test.ts"
   }
 }

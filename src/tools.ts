@@ -19,6 +19,13 @@ interface ToolDeps {
   agentId?: string;
 }
 
+/**
+ * OpenClaw registerTool の execute 戻り値形式に変換
+ */
+function toolResult(data: Record<string, unknown>) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+}
+
 function clampNumber(val: number, min: number, max: number, fallback: number): number {
   if (!Number.isFinite(val)) return fallback;
   return Math.min(max, Math.max(min, val));
@@ -70,13 +77,13 @@ export function registerCoreTools(api: OpenClawPluginApi, deps: ToolDeps): void 
       },
       required: ["text", "category"],
     },
-    async execute(params: any) {
+    async execute(_id: string, params: any) {
       const text = String(params.text || "").trim();
       if (!text || text.length < 3) {
-        return { error: "テキストが短すぎます（最低3文字）" };
+        return toolResult({ error: "テキストが短すぎます（最低3文字）" });
       }
       if (isNoise(text)) {
-        return { error: "この内容はノイズとして判定されました。より具体的な情報を保存してください。" };
+        return toolResult({ error: "この内容はノイズとして判定されました。より具体的な情報を保存してください。" });
       }
 
       const category = CATEGORIES.includes(params.category) ? params.category : "other";
@@ -93,7 +100,7 @@ export function registerCoreTools(api: OpenClawPluginApi, deps: ToolDeps): void 
         metadata: JSON.stringify({ agentId: deps.agentId }),
       });
 
-      return { stored: true, id, category, scope, importance };
+      return toolResult({ stored: true, id, category, scope, importance });
     },
   });
 
@@ -122,18 +129,18 @@ export function registerCoreTools(api: OpenClawPluginApi, deps: ToolDeps): void 
       },
       required: ["query"],
     },
-    async execute(params: any) {
+    async execute(_id: string, params: any) {
       const query = String(params.query || "").trim();
-      if (!query) return { error: "検索クエリが空です" };
+      if (!query) return toolResult({ error: "検索クエリが空です" });
 
       const limit = clampNumber(params.limit ?? 5, 1, 20, 5);
       const scope = deps.scopeManager.resolve(deps.agentId, params.scope);
 
       const results = await deps.retriever.recall(query, scope, limit);
-      return {
+      return toolResult({
         count: results.length,
         memories: formatResults(results),
-      };
+      });
     },
   });
 
@@ -151,11 +158,11 @@ export function registerCoreTools(api: OpenClawPluginApi, deps: ToolDeps): void 
       },
       required: ["id"],
     },
-    async execute(params: any) {
+    async execute(_id: string, params: any) {
       const id = String(params.id || "").trim();
-      if (!id) return { error: "IDが指定されていません" };
+      if (!id) return toolResult({ error: "IDが指定されていません" });
       const deleted = await deps.store.remove(id);
-      return { deleted, id };
+      return toolResult({ deleted, id });
     },
   });
 
@@ -188,12 +195,16 @@ export function registerCoreTools(api: OpenClawPluginApi, deps: ToolDeps): void 
       },
       required: ["id"],
     },
-    async execute(params: any) {
+    async execute(_id: string, params: any) {
       const id = String(params.id || "").trim();
-      if (!id) return { error: "IDが指定されていません" };
+      if (!id) return toolResult({ error: "IDが指定されていません" });
 
       const fields: any = {};
-      if (params.text) fields.text = String(params.text);
+      if (params.text) {
+        fields.text = String(params.text);
+        // テキスト変更時はベクトルも再生成（F-11修正）
+        fields.vector = await deps.embedder.embed(fields.text);
+      }
       if (params.category && CATEGORIES.includes(params.category)) {
         fields.category = params.category;
       }
@@ -202,7 +213,7 @@ export function registerCoreTools(api: OpenClawPluginApi, deps: ToolDeps): void 
       }
 
       const updated = await deps.store.update(id, fields);
-      return { updated, id };
+      return toolResult({ updated, id });
     },
   });
 }
@@ -223,12 +234,12 @@ export function registerManagementTools(api: OpenClawPluginApi, deps: ToolDeps):
         offset: { type: "integer", minimum: 0, description: "オフセット" },
       },
     },
-    async execute(params: any) {
+    async execute(_id: string, params: any) {
       const scope = deps.scopeManager.resolve(deps.agentId, params.scope);
       const limit = clampNumber(params.limit ?? 10, 1, 50, 10);
       const offset = clampNumber(params.offset ?? 0, 0, 10000, 0);
       const entries = await deps.store.listAll(scope, limit, offset);
-      return {
+      return toolResult({
         count: entries.length,
         offset,
         entries: entries.map((e) => ({
@@ -238,7 +249,7 @@ export function registerManagementTools(api: OpenClawPluginApi, deps: ToolDeps):
           importance: e.importance,
           timestamp: new Date(e.timestamp).toISOString(),
         })),
-      };
+      });
     },
   });
 
@@ -252,17 +263,17 @@ export function registerManagementTools(api: OpenClawPluginApi, deps: ToolDeps):
         scope: { type: "string", description: "スコープ（省略時は全体）" },
       },
     },
-    async execute(params: any) {
+    async execute(_id: string, params: any) {
       const total = await deps.store.count();
       const scopeCount = params.scope
         ? await deps.store.count(params.scope)
         : total;
-      return {
+      return toolResult({
         totalEntries: total,
         scopeEntries: scopeCount,
         scope: params.scope || "all",
         vectorDimensions: deps.embedder.dimensions,
-      };
+      });
     },
   });
 }
