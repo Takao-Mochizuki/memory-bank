@@ -123,6 +123,19 @@
             "minimum": 0,
             "default": 60,
             "description": "時間減衰の半減期（日数）。0で無効"
+          },
+          "mmrLambda": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.7,
+            "description": "MMR多様性パラメータ (0=多様性最大, 1=関連性のみ/MMR無効)"
+          },
+          "lengthNormAnchor": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 300,
+            "description": "Length normalizationのアンカー文字数。これより長い記憶はスコアが減衰。0で無効"
           }
         }
       },
@@ -206,6 +219,16 @@
     "retrieval.rerank": {
       "label": "リランキング",
       "help": "cross-encoderで検索精度向上（APIキー必要）",
+      "advanced": true
+    },
+    "retrieval.mmrLambda": {
+      "label": "MMR多様性",
+      "help": "0に近いほど多様な結果、1で純粋なスコア順。デフォルト0.7",
+      "advanced": true
+    },
+    "retrieval.lengthNormAnchor": {
+      "label": "Length Normアンカー",
+      "help": "この文字数より長い記憶はスコアが減衰。0で無効。デフォルト300",
       "advanced": true
     },
     "reflection.enabled": {

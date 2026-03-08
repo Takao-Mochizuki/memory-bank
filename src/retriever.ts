@@ -1,7 +1,7 @@
 /**
  * ハイブリッド検索エンジン
  * ベクトル検索 + BM25 を RRF（Reciprocal Rank Fusion）で統合
- * オプションでCross-Encoderリランキング
+ * MMR による多様性制御、length normalization、Cross-Encoder リランキング
  */
 
 import type { MemoryStore, SearchHit, MemoryEntry } from "./store.js";
@@ -20,6 +20,10 @@ export interface RetrievalConfig {
   recencyBoostDays: number;
   recencyBoostMax: number;
   decayHalfLifeDays: number;
+  /** MMR の多様性パラメータ (0=多様性最大, 1=関連性最大, デフォルト: 0.7) */
+  mmrLambda: number;
+  /** length normalization のアンカー文字数 (デフォルト: 300, 0で無効) */
+  lengthNormAnchor: number;
 }
 
 export interface RetrievalResult {
@@ -40,6 +44,8 @@ export const DEFAULT_CONFIG: RetrievalConfig = {
   recencyBoostDays: 14,
   recencyBoostMax: 0.1,
   decayHalfLifeDays: 60,
+  mmrLambda: 0.7,
+  lengthNormAnchor: 300,
 };
 
 /**
@@ -81,6 +87,86 @@ function timeDecay(timestampMs: number, halfLifeDays: number): number {
 }
 
 /**
+ * Length normalization — 長いテキストがキーワード密度でスコアを稼ぐのを抑制
+ * anchor より短いテキストは微増、長いテキストは徐々にペナルティ
+ * 式: 1 / (1 + log2(charLen / anchor))  (charLen > anchor のとき)
+ */
+export function lengthNorm(textLength: number, anchor: number): number {
+  if (anchor <= 0) return 1;
+  if (textLength <= anchor) {
+    // 短いテキストには軽微なブースト (最大 1.1x)
+    return 1 + 0.1 * (1 - textLength / anchor);
+  }
+  return 1 / (1 + Math.log2(textLength / anchor));
+}
+
+/**
+ * コサイン類似度（正規化済みベクトル前提でなくても動く汎用版）
+ */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+/**
+ * MMR（Maximal Marginal Relevance）— 多様性と関連性のバランス
+ *
+ * スコア順の候補リストから、類似した候補を間引いて多様性を確保する。
+ * lambda=1 で純粋なスコア順（MMR無効相当）、lambda=0 で多様性最大。
+ */
+export function applyMMR(
+  candidates: RetrievalResult[],
+  limit: number,
+  lambda: number,
+): RetrievalResult[] {
+  if (candidates.length <= 1 || lambda >= 1) return candidates.slice(0, limit);
+
+  const selected: RetrievalResult[] = [];
+  const remaining = [...candidates];
+
+  // 最高スコアの候補は無条件で選択
+  selected.push(remaining.shift()!);
+
+  while (selected.length < limit && remaining.length > 0) {
+    let bestIdx = 0;
+    let bestMmrScore = -Infinity;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const candidate = remaining[i];
+      const relevanceScore = candidate.score;
+
+      // 既選択候補との最大類似度
+      let maxSimilarity = 0;
+      for (const sel of selected) {
+        const sim = cosineSimilarity(candidate.entry.vector, sel.entry.vector);
+        if (sim > maxSimilarity) maxSimilarity = sim;
+      }
+
+      // MMR スコア = λ * relevance - (1-λ) * max_similarity
+      const mmrScore = lambda * relevanceScore - (1 - lambda) * maxSimilarity;
+
+      if (mmrScore > bestMmrScore) {
+        bestMmrScore = mmrScore;
+        bestIdx = i;
+      }
+    }
+
+    selected.push(remaining.splice(bestIdx, 1)[0]);
+  }
+
+  return selected;
+}
+
+/**
  * Cross-Encoder リランキング
  */
 async function rerankWithCrossEncoder(
@@ -107,7 +193,6 @@ async function rerankWithCrossEncoder(
   });
 
   if (!response.ok) {
-    // リランキング失敗時は元のスコアで返す
     return candidates;
   }
 
@@ -190,8 +275,10 @@ export function createRetriever(
         const boost = recencyBoost(entry.timestamp, config.recencyBoostDays, config.recencyBoostMax);
         // 重要度ボーナス
         const importanceBonus = (entry.importance - 0.5) * 0.05;
+        // Length normalization
+        const lenNorm = lengthNorm(entry.text.length, config.lengthNormAnchor);
 
-        const finalScore = rawScore * decay + boost + importanceBonus;
+        const finalScore = rawScore * decay * lenNorm + boost + importanceBonus;
 
         if (finalScore >= config.minScore) {
           const sources: string[] = [];
@@ -210,7 +297,14 @@ export function createRetriever(
         results = await rerankWithCrossEncoder(query, results.slice(0, poolSize), config);
       }
 
-      return results.slice(0, limit);
+      // 7. MMR — 多様性制御（リランキング後に適用）
+      if (config.mmrLambda < 1) {
+        results = applyMMR(results, limit, config.mmrLambda);
+      } else {
+        results = results.slice(0, limit);
+      }
+
+      return results;
     },
   };
 }

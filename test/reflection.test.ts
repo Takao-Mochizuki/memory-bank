@@ -64,4 +64,14 @@ describe("parseReflectionOutput", () => {
     assert.equal(result.length, 1);
     assert.equal(result[0].text, "valid");
   });
+
+  it("未定義カテゴリのアイテムを除外", () => {
+    const input = `[
+      {"text":"valid","category":"fact","importance":0.8},
+      {"text":"invalid","category":"unknown","importance":0.9}
+    ]`;
+    const result = parseReflectionOutput(input);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].category, "fact");
+  });
 });

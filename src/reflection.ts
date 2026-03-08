@@ -3,6 +3,7 @@
  * セッション終了時に会話から学びを抽出し、長期記憶として保存
  */
 
+import { CATEGORIES } from "./store.js";
 import type { MemoryStore, MemoryCategory } from "./store.js";
 import type { Embedder } from "./embedder.js";
 import type { ScopeManager } from "./scopes.js";
@@ -97,7 +98,8 @@ export function parseReflectionOutput(output: string): ReflectionItem[] {
         (item: any) =>
           typeof item.text === "string" &&
           typeof item.category === "string" &&
-          typeof item.importance === "number",
+          typeof item.importance === "number" &&
+          CATEGORIES.includes(item.category as MemoryCategory),
       )
       .map((item: any) => ({
         text: item.text.slice(0, 500),

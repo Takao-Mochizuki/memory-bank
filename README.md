@@ -21,6 +21,22 @@ cd memory-bank
 npm install
 ```
 
+その後、OpenClaw 側でこのプラグインディレクトリを読み込む設定にし、ゲートウェイまたは OpenClaw 本体を再起動してください。
+
+最小確認手順:
+
+```bash
+cd ~/.openclaw/plugins/memory-bank
+npm test
+```
+
+実機で確認する項目:
+
+1. OpenClaw 起動時に `memory-bank` がロードされる
+2. `memory_store` と `memory_recall` がツール一覧に出る
+3. 1件保存して 1件検索できる
+4. `autoRecall` や `reflection` を有効化しても起動失敗しない
+
 ## 設定
 
 `~/.openclaw/openclaw.json` にプラグイン設定を追加:

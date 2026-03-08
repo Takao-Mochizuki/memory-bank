@@ -42,6 +42,8 @@ interface PluginConfig {
     recencyBoostDays?: number;
     recencyBoostMax?: number;
     decayHalfLifeDays?: number;
+    mmrLambda?: number;
+    lengthNormAnchor?: number;
   };
   reflection?: {
     enabled?: boolean;
