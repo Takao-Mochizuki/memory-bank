@@ -1,93 +1,110 @@
-# Memory Bank — Grand Runbook
+# Memory Bank — OpenClaw 長期記憶プラグイン
 
-OpenClaw 長期記憶プラグイン。
-このドキュメントは **開発・テスト・デプロイ・運用** の全手順をカバーするグランドランブックです。
-基本的な作業は **Claude Code に指示を渡して実行** する前提で書かれています。
+エージェントが**セッションを超えて記憶を保持・検索**できるようにする OpenClaw プラグイン。
+
+LanceDB（ベクトルDB）にメモリを永続化し、会話開始時に関連記憶を自動でシステムプロンプトに注入する。
 
 ---
 
-## 0. 概要
+## できること
 
-| 項目 | 内容 |
+### 自動機能（設定ONで動く）
+
+| 機能 | 説明 | トリガー |
+|------|------|---------|
+| **Auto-Recall** | 関連する過去の記憶をシステムプロンプトに自動注入 | 毎回の会話開始時（`before_agent_start`） |
+| **Auto-Capture** | ユーザーの発言を自動で記憶に保存 | セッション終了時（`agent_end`） |
+| **Reflection** | セッション要約を自動生成して保存 | `/reset` `/new` 時（`agent_end`） |
+| **Lesson Extraction** | 会話から教訓を自動抽出（重複チェック付き） | Reflection と同時 |
+
+### エージェントツール（6種）
+
+| ツール | 用途 |
+|--------|------|
+| `memory_store` | 重要情報を記憶に保存（カテゴリ・重要度指定可） |
+| `memory_recall` | 関連する記憶を検索（ハイブリッド検索） |
+| `memory_update` | 既存の記憶を更新（ベクトル自動再生成） |
+| `memory_delete` | 不要な記憶を削除 |
+| `memory_list` | 記憶の一覧表示（管理用） |
+| `memory_stats` | 統計情報の確認（管理用） |
+
+### 検索エンジン
+
+| 機能 | 説明 |
 |------|------|
-| リポジトリ | `https://github.com/5dmgmt/memory-bank.git` |
-| ランタイム | Node.js + jiti（TypeScript直接実行） |
-| データベース | LanceDB（ベクトルDB + FTS） |
-| 埋め込み | OpenAI互換API（OpenAI / Ollama / Gemini等） |
-| テスト | 87/87 パス |
-| ライセンス | MIT |
+| **ハイブリッド検索** | Vector + BM25 を RRF（Reciprocal Rank Fusion）で統合 |
+| **Adaptive Retrieval** | クエリ長に応じて Vector/BM25 の重みを自動調整 |
+| **MMR 多様性制御** | 似た記憶ばかり返さない |
+| **Time Decay** | 古い記憶のスコアが半減期に従って減衰 |
+| **近時ブースト** | 最近の記憶にスコアボーナス |
+| **Length Normalization** | 長文記憶のスコア補正 |
+| **Cross-Encoder リランキング** | オプションで精度をさらに向上 |
+| **ノイズフィルター** | 挨拶・定型文を自動除外 |
 
-### 機能一覧
+### メモリ管理
 
-- ハイブリッド検索（Vector + BM25 → RRF統合）
-- Adaptive Retrieval（クエリ長に応じた自動調整）
-- MMR多様性制御 + Length Normalization
-- Cross-Encoder リランキング（オプション）
-- マルチスコープ分離（global / agent: / project: / user:）
-- Scope Access Control（エージェント別アクセス制限）
-- 時間減衰 + 近時ブースト
-- Task-Aware Embeddings（保存/検索で前処理分離）
-- ノイズフィルター（挨拶・定型文除外）
-- Lesson Extraction（教訓自動抽出・重複チェック付き）
-- リフレクション（セッション要約の自動保存）
-- CLI管理ツール（stats / list / inspect / export）
-- 管理ツール（memory_list / memory_stats）
+| 機能 | 説明 |
+|------|------|
+| **スコープ分離** | Global / Agent / User / Project でメモリを分離 |
+| **Scope ACL** | エージェントごとにアクセスできるスコープを制限 |
+| **Task-Aware Embeddings** | 保存時と検索時で前処理を分離 |
+| **CLI管理** | stats / list / inspect / export / import |
 
 ---
 
-## 1. Mac mini への初期デプロイ
+## インストール
 
-Claude Code に以下を渡してください:
+### 1. クローン & インストール
 
-```text
-memory-bank プラグインを Mac mini にセットアップしてください。
+```bash
+git clone https://github.com/5dmgmt/memory-bank.git ~/.openclaw/extensions/memory-bank
+cd ~/.openclaw/extensions/memory-bank
+npm install
+```
 
-■ インストール
-1. git clone https://github.com/5dmgmt/memory-bank.git ~/.openclaw/plugins/memory-bank
-2. cd ~/.openclaw/plugins/memory-bank && npm install
-3. npm test を実行して全テストがパスすることを確認
+### 2. OpenClaw 設定
 
-■ OpenClaw 設定
-~/.openclaw/openclaw.json に以下を追加（既にファイルがあればマージ）:
+`~/.openclaw/openclaw.json` に以下を追加（既にファイルがあればマージ）:
 
+```json
 {
   "plugins": {
-    "memory-bank": {
-      "embedding": {
-        "apiKey": "${OPENAI_API_KEY}",
-        "model": "text-embedding-3-small"
-      },
-      "autoRecall": true,
-      "autoCapture": false,
-      "retrieval": {
-        "mode": "hybrid",
-        "adaptive": true
-      },
-      "reflection": {
-        "enabled": true
-      },
-      "enableManagementTools": true
+    "allow": ["memory-bank"],
+    "entries": {
+      "memory-bank": {
+        "enabled": true,
+        "config": {
+          "embedding": {
+            "apiKey": "${OPENAI_API_KEY}",
+            "model": "text-embedding-3-small"
+          },
+          "autoRecall": true,
+          "retrieval": {
+            "mode": "hybrid",
+            "adaptive": true
+          },
+          "reflection": {
+            "enabled": true
+          },
+          "enableManagementTools": true
+        }
+      }
     }
   }
 }
-
-■ 動作確認
-1. OpenClaw を再起動
-2. memory_store ツールで1件テスト保存:
-   テキスト: "テスト記憶: Memory Bankプラグインの初回動作確認"
-   カテゴリ: fact
-3. memory_recall ツールで "動作確認" と検索して、保存した記憶が返ることを確認
-4. npm run cli -- stats --db ~/.openclaw/memory/memory-bank で統計が見えることを確認
-5. 結果を報告してください
 ```
 
-### Ollama（ローカルモデル）を使う場合
+> **重要**: 設定は `plugins.entries.memory-bank.config` の下に置く。`plugins.memory-bank` に直接書くとエラーになる。
 
-```text
-embedding の設定をローカル Ollama に変更してください:
+### 3. Ollama（完全ローカル・無料）を使う場合
 
-1. ollama pull nomic-embed-text を実行
-2. ~/.openclaw/openclaw.json の embedding を以下に差し替え:
+```bash
+ollama pull nomic-embed-text
+```
+
+embedding 設定を以下に差し替え:
+
+```json
 {
   "embedding": {
     "apiKey": "dummy",
@@ -96,170 +113,29 @@ embedding の設定をローカル Ollama に変更してください:
     "taskAware": true
   }
 }
-3. OpenClaw を再起動して memory_store / memory_recall が動くことを確認
+```
+
+OpenAI 互換の Embedding API ならなんでも使える（Gemini、Azure、Cohere 等）。
+
+### 4. 動作確認
+
+```bash
+# OpenClaw を再起動
+openclaw gateway restart
+
+# テスト保存
+# → エージェントに「memory_store で "テスト記憶" を fact カテゴリで保存して」と指示
+
+# テスト検索
+# → エージェントに「memory_recall で "テスト" を検索して」と指示
+
+# CLI で確認
+npm run cli -- stats --db ~/.openclaw/memory/memory-bank
 ```
 
 ---
 
-## 2. 開発環境セットアップ（開発Mac）
-
-開発はメインの Mac で行い、完成後に Git 経由で Mac mini に渡します。
-
-Claude Code に以下を渡してください:
-
-```text
-memory-bank プラグインの開発環境をセットアップしてください。
-
-1. cd ~/openclaw-plugins/memory-bank
-2. npm install
-3. npm test で 87/87 テストがパスすることを確認
-4. 結果を報告してください
-
-開発時のコマンド:
-- テスト実行: npm test
-- 単一テスト: node --import jiti/register --test test/retrieval.test.ts
-- CLI確認: npm run cli -- help
-```
-
----
-
-## 3. コード修正 → テスト → Git プッシュ
-
-コードを修正した後の手順。Claude Code に以下を渡してください:
-
-```text
-memory-bank プラグインのコードを修正しました。以下の手順で確認・コミットしてください。
-
-1. cd ~/openclaw-plugins/memory-bank
-2. npm test を実行して全テストがパスすることを確認
-3. テストが失敗したら原因を特定して修正
-4. git diff で変更内容を確認
-5. 変更内容に応じた適切なコミットメッセージで git commit
-6. git push origin master
-7. 結果を報告してください
-```
-
-### 新機能を追加する場合
-
-```text
-memory-bank に [機能の説明] を追加してください。
-
-制約:
-- 参考実装（memory-lancedb-pro）のコードはコピーしない
-- eval/exec/動的importの乱用を避ける
-- 新しい外部通信先を増やさない
-- 対応するテストを必ず追加する
-- openclaw.plugin.json の configSchema も更新する
-
-完了後:
-1. npm test で全テストがパスすることを確認
-2. CLAUDE_IMPLEMENTATION_PLAN.md の該当箇所を更新
-3. git commit & push
-4. 変更サマリーを報告してください
-```
-
----
-
-## 4. Mac mini への更新デプロイ
-
-開発 Mac で Git push した後、Mac mini の Claude Code に以下を渡してください:
-
-```text
-memory-bank プラグインを最新版に更新してください。
-
-1. cd ~/.openclaw/plugins/memory-bank
-2. git pull origin master
-3. npm install（依存関係が変わっている可能性があるため）
-4. npm test で全テストがパスすることを確認
-5. OpenClaw を再起動
-6. memory_recall で適当な検索をして動作確認
-7. 結果を報告してください
-```
-
----
-
-## 5. 日常運用
-
-### 記憶の状態を確認する
-
-```text
-memory-bank の記憶データベースの状態を確認してください。
-
-cd ~/.openclaw/plugins/memory-bank
-
-以下を順番に実行:
-1. npm run cli -- stats --db ~/.openclaw/memory/memory-bank
-2. npm run cli -- list --db ~/.openclaw/memory/memory-bank --limit 20
-3. 結果を報告してください
-```
-
-### 記憶をエクスポートする
-
-```text
-memory-bank の全記憶を JSON でエクスポートしてください。
-
-npm run cli -- export --db ~/.openclaw/memory/memory-bank --format json > ~/Desktop/memory-export.json
-
-ファイルサイズと件数を報告してください。
-```
-
-### 特定の記憶を調べる
-
-```text
-memory-bank で ID が [記憶のID] の記憶を詳細表示してください。
-
-cd ~/.openclaw/plugins/memory-bank
-npm run cli -- inspect [記憶のID] --db ~/.openclaw/memory/memory-bank
-```
-
----
-
-## 6. トラブルシューティング
-
-### プラグインが動かない場合
-
-```text
-memory-bank プラグインが動かないので調査してください。
-
-確認手順:
-1. cd ~/.openclaw/plugins/memory-bank && npm test → テストが通るか
-2. node --import jiti/register -e "import('./src/store.js').then(m => m.createStore('/tmp/test-mb', 1536)).then(() => console.log('OK'))" → LanceDB が動くか
-3. cat ~/.openclaw/openclaw.json | grep -A 20 memory-bank → 設定が正しいか
-4. OpenClaw のログに memory-bank 関連のエラーがないか
-5. node -v → Node.js バージョン（18以上が必要）
-6. 見つかった問題と修正方法を報告してください
-```
-
-### npm install が失敗する場合
-
-```text
-memory-bank の npm install が失敗します。
-
-@lancedb/lancedb はネイティブモジュールを含むため、以下を確認してください:
-1. node -v（18以上か）
-2. python3 --version（ネイティブビルドに必要な場合がある）
-3. xcode-select --install が済んでいるか
-4. npm cache clean --force してから再度 npm install
-5. 結果を報告してください
-```
-
-### 検索結果がおかしい場合
-
-```text
-memory-bank の検索結果がおかしいので調査してください。
-
-1. memory_recall で "[問題のクエリ]" を検索してスコアを確認
-2. npm run cli -- list --db ~/.openclaw/memory/memory-bank --limit 30 で記憶の一覧を確認
-3. 以下の設定を確認:
-   - retrieval.adaptive が true か
-   - retrieval.minScore が高すぎないか（デフォルト 0.3）
-   - retrieval.mmrLambda の値（デフォルト 0.7）
-4. 原因と対策を報告してください
-```
-
----
-
-## 7. 設定リファレンス
+## 設定リファレンス
 
 ### embedding（必須）
 
@@ -271,6 +147,15 @@ memory-bank の検索結果がおかしいので調査してください。
 | `dimensions` | integer | 自動検出 | ベクトル次元数 |
 | `taskAware` | boolean | `true` | 保存/検索で前処理を分離 |
 
+### autoRecall / autoCapture
+
+| キー | 型 | デフォルト | 説明 |
+|------|-----|-----------|------|
+| `autoRecall` | boolean | `false` | 会話開始時に関連記憶を自動注入 |
+| `autoCapture` | boolean | `false` | セッション終了時にユーザー発言を自動保存 |
+| `autoRecallMinLength` | integer | `10` | 自動想起の最小プロンプト長 |
+| `autoRecallCategories` | string[] | fact,lesson,preference,decision,entity,other | 自動想起の対象カテゴリ（reflection は除外） |
+
 ### retrieval（オプション）
 
 | キー | 型 | デフォルト | 説明 |
@@ -279,90 +164,72 @@ memory-bank の検索結果がおかしいので調査してください。
 | `vectorWeight` | number | `0.7` | ベクトル検索の重み |
 | `bm25Weight` | number | `0.3` | BM25の重み |
 | `adaptive` | boolean | `true` | クエリ長に応じて重みを自動調整 |
-| `minScore` | number | `0.3` | 最低スコア閾値 |
+| `minScore` | number | `0.005` | 最低スコア閾値 |
 | `mmrLambda` | number | `0.7` | MMR多様性（0=多様性最大, 1=関連性のみ） |
-| `lengthNormAnchor` | integer | `300` | この文字数より長い記憶はスコア減衰。0で無効 |
-| `decayHalfLifeDays` | number | `60` | 時間減衰の半減期（日数）。0で無効 |
+| `lengthNormAnchor` | integer | `300` | この文字数より長い記憶はスコア減衰 |
+| `decayHalfLifeDays` | number | `60` | 時間減衰の半減期（日数） |
 | `recencyBoostDays` | number | `14` | 近時ブーストの半減期（日数） |
-| `recencyBoostMax` | number | `0.1` | 近時ブーストの最大値 |
 | `candidatePoolSize` | integer | `20` | リランク前の候補数 |
-| `rerank` | `"cross-encoder"` \| `"none"` | `none` | リランキング方式 |
-| `rerankApiKey` | string | — | リランカーAPIキー |
-| `rerankModel` | string | `jina-reranker-v2-base-multilingual` | リランカーモデル |
-| `rerankEndpoint` | string | `https://api.jina.ai/v1/rerank` | リランカーエンドポイント |
 
-### scopes（オプション）
+### reflection
 
 | キー | 型 | デフォルト | 説明 |
 |------|-----|-----------|------|
-| `defaultScope` | string | `global` | デフォルトスコープ |
-| `definitions` | object | — | カスタムスコープ定義 |
-| `agentAccess` | object | — | エージェント別アクセス許可リスト |
-
-`agentAccess` の例:
-
-```json
-{
-  "scopes": {
-    "agentAccess": {
-      "code-agent": ["global", "project:myapp"],
-      "admin-agent": ["*"],
-      "sandbox-agent": []
-    }
-  }
-}
-```
-
-- 未登録のエージェント → 全スコープにアクセス可
-- `["*"]` → 全スコープ許可
-- `[]` → 全スコープ拒否
+| `reflection.enabled` | boolean | `true` | リフレクション有効化 |
+| `reflection.maxMessages` | integer | `100` | リフレクション対象の最大メッセージ数 |
 
 ### その他
 
 | キー | 型 | デフォルト | 説明 |
 |------|-----|-----------|------|
 | `dbPath` | string | `~/.openclaw/memory/memory-bank` | LanceDBパス |
-| `autoRecall` | boolean | `false` | 関連記憶を自動注入 |
-| `autoCapture` | boolean | `false` | ユーザー発言を自動保存 |
-| `autoRecallMinLength` | integer | `10` | 自動想起の最小プロンプト長 |
-| `reflection.enabled` | boolean | `true` | リフレクション有効化 |
-| `reflection.maxMessages` | integer | `100` | リフレクション対象の最大メッセージ数 |
 | `enableManagementTools` | boolean | `false` | memory_list / memory_stats を有効化 |
 
 ---
 
-## 8. エージェントツール
+## CLI
 
-| ツール | 説明 |
-|--------|------|
-| `memory_store` | 重要な情報を長期記憶に保存 |
-| `memory_recall` | 関連する記憶を検索 |
-| `memory_delete` | 指定IDの記憶を削除 |
-| `memory_update` | 既存の記憶を更新（テキスト変更時はベクトルも再生成） |
-| `memory_list` | 記憶一覧（管理用・要 `enableManagementTools`） |
-| `memory_stats` | 統計情報（管理用・要 `enableManagementTools`） |
+```bash
+npm run cli -- stats      # 統計
+npm run cli -- list       # 一覧
+npm run cli -- inspect    # 詳細表示
+npm run cli -- export     # エクスポート
+npm run cli -- import     # インポート
+```
+
+すべて `--db <path>` でデータベースパスを指定可能。
 
 ---
 
-## 9. セキュリティ
+## 技術的な注意点
 
-- 外部通信: Embedding API と オプションのリランカーAPI のみ
-- ファイルアクセス: LanceDB データベースパスのみ
-- APIキー: 設定ファイル経由（環境変数参照推奨）
-- eval/exec: 使用していません
-- CLI: 読み取り専用（破壊的操作なし）
+### activate は同期関数
+
+OpenClaw は async な `activate()` の戻り値を無視する。そのため本プラグインは activate を同期関数にして、LanceDB接続等の非同期初期化は `initPromise` パターンで遅延実行している。フック・ツール内部で `await initPromise` してから使う設計。
+
+### agent_end フックの発火条件
+
+`agent_end` は `/reset`、`/new`、チャネル経由のセッション終了時に発火する。CLI の `openclaw agent` 単発実行では発火しない（OpenClaw の仕様）。
+
+### BM25 検索
+
+LanceDB の `.search(query, "text")` は embedding function が必要でエラーになる。代わりに `.query().fullTextSearch(query)` を使用している。
+
+---
+
+## セキュリティ
+
+- 外部通信: Embedding API のみ（設定したエンドポイント以外には一切通信しない）
+- eval / exec: 不使用
+- ファイルアクセス: LanceDB のデータベースパスのみ
+- テスト: 87件（86パス / 1件は既知の閾値テスト）
 - スコープ分離: エージェント間の記憶越境を防止
 
 ---
 
 ## 免責事項
 
-本ソフトウェアは「現状のまま」（AS IS）提供されます。作者は本ソフトウェアの使用によって生じたいかなる損害についても責任を負いません。
-
-- 本プラグインの導入・使用はすべて利用者自身の責任で行ってください
-- データの損失、APIキーの漏洩、その他の損害について作者は一切の責任を負いません
-- 本ソフトウェアは動作を保証するものではありません
-- セキュリティに関する問題を発見した場合は Issue で報告してください
+本ソフトウェアは「現状のまま」（AS IS）提供されます。導入・使用はすべて利用者自身の責任で行ってください。データの損失、APIキーの漏洩、その他の損害について作者は一切の責任を負いません。
 
 詳細は [LICENSE](./LICENSE) ファイルを参照してください。
 
