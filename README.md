@@ -273,6 +273,63 @@ crontab -e
 
 ---
 
+## Claude Code（claude CLI）での使い方
+
+memory-bank は OpenClaw ゲートウェイ経由で Claude Code と連携する。
+
+```bash
+# 1. OpenClaw ゲートウェイを起動
+openclaw gateway start
+
+# 2. Claude Code を通常通り使用
+claude
+
+# 3. 記憶の操作はツール呼び出しで行う
+# → 「memory_store で "DBスキーマは PostgreSQL 15" を fact で保存して」
+# → 「memory_recall で "データベース" を検索して」
+```
+
+### 自動で動く機能
+
+- **Auto-Recall**: 会話開始時に関連する過去の記憶がシステムプロンプトに自動注入される
+- **Auto-Capture**: セッション終了時（`/reset`, `/new`）にユーザー発言が自動保存される
+- **Reflection**: セッション要約と教訓が自動抽出される
+
+> **注意**: `agent_end` フックは `/reset`・`/new`・チャネル経由のセッション終了時のみ発火する。CLI 単発実行では発火しない。
+
+---
+
+## トラブルシューティング
+
+### プラグインが読み込まれない
+
+1. `~/.openclaw/openclaw.json` の JSON 構文を確認
+2. 設定パスは `plugins.entries.memory-bank.config` の下に置く（`plugins.memory-bank` 直下はエラー）
+3. `openclaw gateway restart` で再起動
+
+### Embedding API エラー
+
+- **OpenAI**: `OPENAI_API_KEY` 環境変数が設定されているか確認: `echo $OPENAI_API_KEY`
+- **Ollama**: `ollama serve` が起動しているか確認: `curl http://localhost:11434/api/tags`
+- **401 Unauthorized**: API キーが無効。再発行して `export OPENAI_API_KEY="sk-..."` で設定
+
+### Auto-Recall が動かない
+
+- 設定で `"autoRecall": true` になっているか確認
+- Auto-Recall は `before_agent_start` フックで動作する（OpenClaw ゲートウェイ経由のみ）
+- プロンプトが短すぎる場合（デフォルト10文字未満）はスキップされる
+
+### メモリが保存されない
+
+- DB パスのディレクトリが存在し書き込み可能か確認: `ls -la ~/.openclaw/memory/`
+- `npm run cli -- stats --db ~/.openclaw/memory/memory-bank` で DB 状態を確認
+
+### BM25 検索が動かない
+
+LanceDB の FTS インデックスが必要。初回起動時に自動作成されるが、失敗した場合はログに警告が出る。DB を削除して再作成することで解決する場合がある。
+
+---
+
 ## 技術的な注意点
 
 ### activate は同期関数

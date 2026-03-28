@@ -4,8 +4,9 @@
  * read-only 操作のみ
  */
 
-import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync, realpathSync, statSync } from "node:fs";
+import { join, resolve, relative } from "node:path";
+import { homedir } from "node:os";
 import type { MemoryEntry } from "./src/store.ts";
 import { sqlEscape } from "./src/store.ts";
 
@@ -85,6 +86,45 @@ async function queryAll(table: Awaited<ReturnType<typeof openTable>>, scope?: st
   return rows.map(rowToEntry);
 }
 
+// ── パス検証（ホームディレクトリ配下のみ許可） ──
+
+function validatePath(p: string, label: string): string {
+  let expanded: string;
+  if (p.startsWith("~/") || p === "~") {
+    expanded = join(homedir(), p.slice(2));
+  } else {
+    expanded = p;
+  }
+  const resolved = resolve(expanded);
+  const home = homedir();
+
+  // 論理パス検証
+  const rel = relative(home, resolved);
+  if (rel.startsWith("..") || resolve(home, rel) !== resolved) {
+    console.error(`Error: ${label} はホームディレクトリ配下のみ指定可能です: ${resolved}`);
+    process.exit(1);
+  }
+
+  // symlink 対策: 既存パスの実体がホーム配下か検証
+  let checkPath = resolved;
+  while (!existsSync(checkPath)) {
+    const parent = resolve(checkPath, "..");
+    if (parent === checkPath) break;
+    checkPath = parent;
+  }
+  if (existsSync(checkPath)) {
+    const realHome = realpathSync(home);
+    const realCheck = realpathSync(checkPath);
+    const realRel = relative(realHome, realCheck);
+    if (realRel.startsWith("..") || resolve(realHome, realRel) !== realCheck) {
+      console.error(`Error: ${label} の実体パスがホームディレクトリ外を指しています: ${realCheck}`);
+      process.exit(1);
+    }
+  }
+
+  return resolved;
+}
+
 // ── DB パス解決 ──
 
 function resolveDbPath(flags: Record<string, string>): string {
@@ -93,7 +133,7 @@ function resolveDbPath(flags: Record<string, string>): string {
     console.error("Error: DB path required. Use --db <path> or set MEMORY_BANK_DB env var.");
     process.exit(1);
   }
-  return dbPath;
+  return validatePath(dbPath, "--db");
 }
 
 // ── ヘルパー ──
@@ -241,11 +281,12 @@ ${entry.text}
 }
 
 async function cmdObsidianExport(flags: Record<string, string>): Promise<void> {
-  const vaultPath = flags["vault"];
-  if (!vaultPath) {
+  const rawVaultPath = flags["vault"];
+  if (!rawVaultPath) {
     console.error("Error: --vault <path> is required for obsidian-export.");
     process.exit(1);
   }
+  const vaultPath = validatePath(rawVaultPath, "--vault");
 
   const table = await openTable(resolveDbPath(flags));
   const allEntries = await queryAll(table);
@@ -256,7 +297,8 @@ async function cmdObsidianExport(flags: Record<string, string>): Promise<void> {
   }
 
   // Filter: keep valuable memories only
-  const minReflectionImportance = parseFloat(flags["min-reflection-importance"] ?? "0.85");
+  const parsedImportance = parseFloat(flags["min-reflection-importance"] ?? "0.85");
+  const minReflectionImportance = Number.isFinite(parsedImportance) && parsedImportance >= 0 && parsedImportance <= 1 ? parsedImportance : 0.85;
   const entries = allEntries.filter((e) => {
     if (e.category !== "reflection") return true;
     return (e.importance ?? 0) >= minReflectionImportance;
@@ -276,8 +318,11 @@ async function cmdObsidianExport(flags: Record<string, string>): Promise<void> {
     for (const f of readdirSync(vaultPath)) {
       if (f.endsWith(".md") && f !== "_index.md") {
         const full = join(vaultPath, f);
-        // Only remove flat files, not directories
-        try { unlinkSync(full); } catch {}
+        // Only remove regular files, not directories or symlinks
+        try {
+          const st = statSync(full, { throwIfNoEntry: false });
+          if (st?.isFile()) unlinkSync(full);
+        } catch { /* skip on error */ }
       }
     }
   }
