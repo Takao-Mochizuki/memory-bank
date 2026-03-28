@@ -228,11 +228,24 @@ async function cmdObsidianExport(flags: Record<string, string>): Promise<void> {
   }
 
   const table = await openTable(resolveDbPath(flags));
-  const entries = await queryAll(table);
+  const allEntries = await queryAll(table);
 
-  if (entries.length === 0) {
+  if (allEntries.length === 0) {
     console.log("No memories found to export.");
     return;
+  }
+
+  // Filter: keep valuable memories only
+  // - Non-reflection categories: always include
+  // - Reflection: only importance >= 0.85 (manually flagged as important)
+  const minReflectionImportance = parseFloat(flags["min-reflection-importance"] ?? "0.85");
+  const entries = allEntries.filter((e) => {
+    if (e.category !== "reflection") return true;
+    return (e.importance ?? 0) >= minReflectionImportance;
+  });
+  const skipped = allEntries.length - entries.length;
+  if (skipped > 0) {
+    console.log(`Filtered: ${skipped} low-importance reflections excluded (threshold: ${minReflectionImportance})`);
   }
 
   // Ensure vault directory exists
@@ -255,7 +268,7 @@ async function cmdObsidianExport(flags: Record<string, string>): Promise<void> {
     console.log(`  ${category}.md — ${catEntries.length} entries`);
   }
 
-  // Write all.md
+  // Write all.md (filtered)
   const allContent = entries.map(entryToMarkdown).join("\n---\n\n");
   writeFileSync(join(vaultPath, "all.md"), allContent, "utf-8");
   console.log(`  all.md — ${entries.length} entries`);
