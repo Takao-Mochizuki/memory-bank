@@ -4,7 +4,7 @@
  * read-only 操作のみ
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MemoryEntry } from "./src/store.ts";
 import { sqlEscape } from "./src/store.ts";
@@ -202,16 +202,36 @@ async function cmdExport(flags: Record<string, string>): Promise<void> {
 
 // ── Obsidian Export ──
 
+const CATEGORY_JA: Record<string, string> = {
+  decision: "決定事項",
+  fact: "知識・事実",
+  preference: "好み・スタイル",
+  reflection: "気づき・教訓",
+  entity: "人物・プロジェクト",
+};
+
+const SCOPE_JA: Record<string, string> = {
+  global: "グローバル",
+  user: "ユーザー",
+  agent: "エージェント",
+};
+
+function sanitizeFilename(s: string): string {
+  return s.replace(/[/\\:*?"<>|]/g, "_");
+}
+
 function entryToMarkdown(entry: MemoryEntry): string {
   const date = new Date(entry.timestamp).toISOString().slice(0, 10);
-  const title = entry.text.slice(0, 50).replace(/\n/g, " ");
+  const title = entry.text.slice(0, 30).replace(/\n/g, " ");
+  const categoryJa = CATEGORY_JA[entry.category] ?? "その他";
+  const scopeJa = SCOPE_JA[entry.scope] ?? entry.scope;
   return `---
 id: ${entry.id}
-category: ${entry.category}
-scope: ${entry.scope}
-importance: ${entry.importance}
-date: ${date}
-tags: [${entry.category}, ${entry.scope}]
+カテゴリ: ${categoryJa}
+スコープ: ${scopeJa}
+重要度: ${entry.importance}
+日付: ${date}
+タグ: [${categoryJa}, ${scopeJa}]
 ---
 
 # ${title}
@@ -236,8 +256,6 @@ async function cmdObsidianExport(flags: Record<string, string>): Promise<void> {
   }
 
   // Filter: keep valuable memories only
-  // - Non-reflection categories: always include
-  // - Reflection: only importance >= 0.85 (manually flagged as important)
   const minReflectionImportance = parseFloat(flags["min-reflection-importance"] ?? "0.85");
   const entries = allEntries.filter((e) => {
     if (e.category !== "reflection") return true;
@@ -253,6 +271,17 @@ async function cmdObsidianExport(flags: Record<string, string>): Promise<void> {
     mkdirSync(vaultPath, { recursive: true });
   }
 
+  // Remove old flat category files (e.g. decision.md, all.md)
+  if (existsSync(vaultPath)) {
+    for (const f of readdirSync(vaultPath)) {
+      if (f.endsWith(".md") && f !== "_index.md") {
+        const full = join(vaultPath, f);
+        // Only remove flat files, not directories
+        try { unlinkSync(full); } catch {}
+      }
+    }
+  }
+
   // Group by category
   const byCategory = new Map<string, MemoryEntry[]>();
   for (const entry of entries) {
@@ -261,23 +290,37 @@ async function cmdObsidianExport(flags: Record<string, string>): Promise<void> {
     byCategory.get(cat)!.push(entry);
   }
 
-  // Write category files
+  // Create category folders and write 1 file per memory
   for (const [category, catEntries] of byCategory) {
-    const content = catEntries.map(entryToMarkdown).join("\n---\n\n");
-    writeFileSync(join(vaultPath, `${category}.md`), content, "utf-8");
-    console.log(`  ${category}.md — ${catEntries.length} entries`);
-  }
+    const folderName = CATEGORY_JA[category] ?? "その他";
+    const folderPath = join(vaultPath, folderName);
+    mkdirSync(folderPath, { recursive: true });
 
-  // Write all.md (filtered)
-  const allContent = entries.map(entryToMarkdown).join("\n---\n\n");
-  writeFileSync(join(vaultPath, "all.md"), allContent, "utf-8");
-  console.log(`  all.md — ${entries.length} entries`);
+    const usedNames = new Set<string>();
+    for (const entry of catEntries) {
+      const date = new Date(entry.timestamp).toISOString().slice(0, 10);
+      const titleRaw = entry.text.slice(0, 30).replace(/\n/g, " ").trim();
+      const titleSafe = sanitizeFilename(titleRaw);
+      let baseName = `${date}_${titleSafe}`;
+      let fileName = baseName;
+      let counter = 2;
+      while (usedNames.has(fileName)) {
+        fileName = `${baseName}_${counter}`;
+        counter++;
+      }
+      usedNames.add(fileName);
+
+      const content = entryToMarkdown(entry);
+      writeFileSync(join(folderPath, `${fileName}.md`), content, "utf-8");
+    }
+    console.log(`  ${folderName}/ — ${catEntries.length} entries`);
+  }
 
   // Write _index.md
   const now = new Date().toISOString();
   const categoryStats = [...byCategory.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([cat, arr]) => `| ${cat} | ${arr.length} |`)
+    .map(([cat, arr]) => `| ${CATEGORY_JA[cat] ?? "その他"} | ${arr.length} |`)
     .join("\n");
 
   const indexContent = `---
@@ -285,16 +328,31 @@ last_sync: ${now}
 total: ${entries.length}
 ---
 
-# Memory Bank Index
+# Memory Bank インデックス
 
-**Total memories:** ${entries.length}
-**Last sync:** ${now}
+**総記憶数:** ${entries.length}件
+**最終同期:** ${now.slice(0, 10)}
 
-## Categories
+## カテゴリ別件数
 
-| Category | Count |
-|----------|-------|
+| カテゴリ | 件数 |
+|---------|------|
 ${categoryStats}
+
+## Dataviewクエリ例
+
+\`\`\`dataview
+TABLE 重要度, 日付, スコープ
+FROM "openclaw/memories"
+SORT 日付 DESC
+LIMIT 20
+\`\`\`
+
+\`\`\`dataview
+TABLE 重要度, 日付
+FROM "openclaw/memories/決定事項"
+SORT 重要度 DESC
+\`\`\`
 `;
   writeFileSync(join(vaultPath, "_index.md"), indexContent, "utf-8");
   console.log(`  _index.md`);
