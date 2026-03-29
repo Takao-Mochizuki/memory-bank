@@ -35,10 +35,13 @@ export interface RetrievalResult {
   sources: string[];
 }
 
+/** BM25スコアがこの閾値以上なら「強い一致」とみなし、ベクター検索を省略して優先返却 */
+export const BM25_STRONG_THRESHOLD = 2.0;
+
 export const DEFAULT_CONFIG: RetrievalConfig = {
   mode: "hybrid",
-  vectorWeight: 0.7,
-  bm25Weight: 0.3,
+  vectorWeight: 0.3,
+  bm25Weight: 0.7,
   minScore: 0.005,
   rerank: "none",
   rerankModel: "jina-reranker-v2-base-multilingual",
@@ -304,29 +307,58 @@ export function createRetriever(
       const effective = adaptConfig(config, query.length);
       const poolSize = effective.candidatePoolSize;
 
-      // 1. ベクトル検索
+      // エントリをIDで参照できるように
+      const entryMap = new Map<string, MemoryEntry>();
+
+      // --- BM25優先モード ---
+      // Step 1: BM25検索を最初に実行
+      let bm25Hits: SearchHit[] = [];
+      const bm25Ranking = new Map<string, number>();
+
+      if (effective.mode === "hybrid") {
+        bm25Hits = await store.searchFullText(query, scope, poolSize);
+        bm25Hits.forEach((h) => entryMap.set(h.entry.id, h.entry));
+        bm25Hits.forEach((hit, i) => bm25Ranking.set(hit.entry.id, i + 1));
+
+        // Step 2: BM25で強い一致があればベクター検索を省略して優先返却
+        const strongBM25 = bm25Hits.filter((h) => h.distance >= BM25_STRONG_THRESHOLD);
+        if (strongBM25.length >= limit) {
+          let results: RetrievalResult[] = strongBM25.map((h) => {
+            const decay = timeDecay(h.entry.timestamp, effective.decayHalfLifeDays);
+            const boost = recencyBoost(h.entry.timestamp, effective.recencyBoostDays, effective.recencyBoostMax);
+            const importanceBonus = (h.entry.importance - 0.5) * 0.05;
+            const lenNorm = lengthNorm(h.entry.text.length, effective.lengthNormAnchor);
+            const score = h.distance * decay * lenNorm + boost + importanceBonus;
+            return { entry: h.entry, score, sources: ["bm25"] };
+          });
+          results.sort((a, b) => b.score - a.score);
+
+          // Cross-Encoder リランキング
+          if (effective.rerank === "cross-encoder" && effective.rerankApiKey) {
+            results = await rerankWithCrossEncoder(query, results.slice(0, poolSize), effective);
+          }
+          // MMR — 多様性制御
+          if (effective.mmrLambda < 1) {
+            results = applyMMR(results, limit, effective.mmrLambda);
+          } else {
+            results = results.slice(0, limit);
+          }
+          return results;
+        }
+      }
+
+      // Step 3: ベクトル検索で補完
       const queryVector = await embedder.embed(query);
       const vectorHits = await store.search(queryVector, scope, poolSize);
 
-      // ベクトル結果のランキング
       const vectorRanking = new Map<string, number>();
       vectorHits.forEach((hit, i) => vectorRanking.set(hit.entry.id, i + 1));
-
-      // エントリをIDで参照できるように
-      const entryMap = new Map<string, MemoryEntry>();
       vectorHits.forEach((h) => entryMap.set(h.entry.id, h.entry));
 
       let fusedScores: Map<string, number>;
 
       if (effective.mode === "hybrid") {
-        // 2. BM25 フルテキスト検索
-        const textHits = await store.searchFullText(query, scope, poolSize);
-        textHits.forEach((h) => entryMap.set(h.entry.id, h.entry));
-
-        const bm25Ranking = new Map<string, number>();
-        textHits.forEach((hit, i) => bm25Ranking.set(hit.entry.id, i + 1));
-
-        // 3. RRF 融合
+        // Step 4: RRF統合（BM25重み増加: デフォルト bm25=0.7, vector=0.3）
         fusedScores = computeRRF(
           [vectorRanking, bm25Ranking],
           [effective.vectorWeight, effective.bm25Weight],
@@ -339,7 +371,7 @@ export function createRetriever(
         }
       }
 
-      // 4. スコアリングパイプライン
+      // 5. スコアリングパイプライン
       let results: RetrievalResult[] = [];
 
       for (const [id, rawScore] of fusedScores) {
@@ -360,7 +392,7 @@ export function createRetriever(
         if (finalScore >= effective.minScore) {
           const sources: string[] = [];
           if (vectorRanking.has(id)) sources.push("vector");
-          if (effective.mode === "hybrid") sources.push("bm25");
+          if (bm25Ranking.has(id)) sources.push("bm25");
 
           results.push({ entry, score: finalScore, sources });
         }
